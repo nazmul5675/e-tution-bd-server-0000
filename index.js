@@ -28,12 +28,41 @@ async function run() {
     try {
         // Connect the client to the server	(optional starting in v4.7)
         await client.connect();
-
+        const db = client.db('e-tuition-bd');
+        const usersCollection = db.collection('users')
 
         app.get('/', (req, res) => {
             res.send('E-Tuition-BD Server is Running!')
         })
 
+        app.post("/users", async (req, res) => {
+            const user = req.body;
+
+            const filter = { email: user.email };
+
+            const updateDoc = {
+                $set: {
+                    name: user.name || "",
+                    phone: user.phone || "",
+                    photoURL: user.photoURL || "",
+                    lastLoginAt: new Date(),
+                },
+                $setOnInsert: {
+
+                    role: user.role || "student",
+                    createdAt: new Date(),
+                    email: user.email,
+                },
+            };
+
+            const result = await usersCollection.updateOne(filter, updateDoc, { upsert: true });
+
+            res.send(result);
+        });
+        app.get("/users", async (req, res) => {
+            const users = await usersCollection.find().toArray();
+            res.send(users);
+        });
 
 
 
