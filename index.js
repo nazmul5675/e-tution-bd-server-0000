@@ -1,6 +1,6 @@
 require('dotenv').config()
 const express = require('express')
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const cors = require('cors')
 const app = express()
 const port = process.env.PORT || 3000
@@ -29,12 +29,13 @@ async function run() {
         // Connect the client to the server	(optional starting in v4.7)
         await client.connect();
         const db = client.db('e-tuition-bd');
-        const usersCollection = db.collection('users')
+        const usersCollection = db.collection('users');
+        const tuitionsCollection = db.collection('tuitions');
 
         app.get('/', (req, res) => {
             res.send('E-Tuition-BD Server is Running!')
         })
-
+        // users api
         app.post("/users", async (req, res) => {
             const user = req.body;
 
@@ -63,8 +64,124 @@ async function run() {
             const users = await usersCollection.find().toArray();
             res.send(users);
         });
+        // tuitions api
+        app.post("/tuitions", async (req, res) => {
+            try {
+                const data = req.body;
+
+                // Basic validation 
+                const required = ["subject", "classLevel", "location", "schedule", "budget", "studentEmail"];
+                for (const key of required) {
+                    if (!data?.[key]) {
+                        return res.status(400).send({ message: `${key} is required` });
+                    }
+                }
+
+                const tuitionDoc = {
+                    subject: data.subject,
+                    classLevel: data.classLevel,
+                    location: data.location,
+                    schedule: data.schedule,
+                    daysPerWeek: Number(data.daysPerWeek || 0),
+                    budget: Number(data.budget || 0),
+                    preferredTutorGender: data.preferredTutorGender || "Any",
+                    note: data.note || "",
+
+                    // student info
+                    studentName: data.studentName || "",
+                    studentEmail: data.studentEmail,
+                    studentPhoto: data.studentPhoto || "",
+                    status: "pending",
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                };
+
+                const result = await tuitionsCollection.insertOne(tuitionDoc);
+                res.send({ insertedId: result.insertedId });
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to post tuition" });
+            }
+        })
+        app.get("/tuitions", async (req, res) => {
+            try {
+                const { studentEmail, status } = req.query;
+
+                const query = {};
+                if (studentEmail) query.studentEmail = studentEmail;
+                if (status) query.status = status; // pending/approved/rejected
+
+                const result = await tuitionsCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to load tuitions" });
+            }
+        });
+        app.patch("/tuitions/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const updatedData = req.body;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ message: "Invalid tuition id" });
+                }
 
 
+                const updateDoc = {
+                    $set: {
+                        subject: updatedData.subject,
+                        classLevel: updatedData.classLevel,
+                        location: updatedData.location,
+                        schedule: updatedData.schedule,
+                        daysPerWeek: Number(updatedData.daysPerWeek || 0),
+                        budget: Number(updatedData.budget || 0),
+                        preferredTutorGender: updatedData.preferredTutorGender || "Any",
+                        note: updatedData.note || "",
+                        updatedAt: new Date(),
+                    },
+                };
+
+                const result = await tuitionsCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    updateDoc
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({ message: "Tuition not found" });
+                }
+
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to update tuition" });
+            }
+        });
+
+        app.delete("/tuitions/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ message: "Invalid tuition id" });
+                }
+
+                const result = await tuitionsCollection.deleteOne({ _id: new ObjectId(id) });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({ message: "Tuition not found" });
+                }
+
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to delete tuition" });
+            }
+        });
 
 
 
