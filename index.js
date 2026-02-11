@@ -153,7 +153,20 @@ async function run() {
                 res.status(500).send({ message: "Failed to update user" });
             }
         });
+        app.delete("/users/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid user id" });
 
+                const result = await usersCollection.deleteOne({ _id: new ObjectId(id) });
+                if (result.deletedCount === 0) return res.status(404).send({ message: "User not found" });
+
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to delete user" });
+            }
+        });
 
 
         // tuitions api
