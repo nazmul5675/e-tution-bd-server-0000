@@ -64,6 +64,55 @@ async function run() {
             const users = await usersCollection.find().toArray();
             res.send(users);
         });
+        app.get("/users/profile", async (req, res) => {
+            try {
+                const email = req.query.email;
+                if (!email) return res.status(400).send({ message: "email is required" });
+
+                const user = await usersCollection.findOne(
+                    { email },
+                    { projection: { name: 1, email: 1, phone: 1, photoURL: 1, role: 1, createdAt: 1, updatedAt: 1 } }
+                );
+
+                if (!user) return res.status(404).send({ message: "User not found" });
+                res.send(user);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to load profile" });
+            }
+        });
+        app.patch("/users/profile", async (req, res) => {
+            try {
+                const email = req.query.email;
+                const { name, phone, photoURL } = req.body;
+
+                if (!email) return res.status(400).send({ message: "email is required" });
+                if (!name?.trim()) return res.status(400).send({ message: "name is required" });
+
+                const updateDoc = {
+                    $set: {
+                        name: name.trim(),
+                        phone: phone?.trim() || "",
+                        ...(photoURL ? { photoURL } : {}),
+                        updatedAt: new Date(),
+                    },
+                };
+
+                const result = await usersCollection.updateOne({ email }, updateDoc);
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({ message: "User not found" });
+                }
+
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to update profile" });
+            }
+        });
+
+
+
         // tuitions api
         app.post("/tuitions", async (req, res) => {
             try {
