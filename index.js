@@ -31,6 +31,7 @@ async function run() {
         const db = client.db('e-tuition-bd');
         const usersCollection = db.collection('users');
         const tuitionsCollection = db.collection('tuitions');
+        const applicationsCollection = db.collection("applications");
 
         app.get('/', (req, res) => {
             res.send('E-Tuition-BD Server is Running!')
@@ -232,7 +233,134 @@ async function run() {
             }
         });
 
+        // applicationsCollection api
+        app.post("/applications", async (req, res) => {
+            try {
+                const data = req.body;
 
+                const required = ["tuitionId", "tutorEmail", "tutorName", "qualifications", "experience", "expectedSalary"];
+                for (const key of required) {
+                    if (!data?.[key]) return res.status(400).send({ message: `${key} is required` });
+                }
+
+                if (!ObjectId.isValid(data.tuitionId)) {
+                    return res.status(400).send({ message: "Invalid tuitionId" });
+                }
+
+                const tuition = await tuitionsCollection.findOne({ _id: new ObjectId(data.tuitionId) });
+                if (!tuition) return res.status(404).send({ message: "Tuition not found" });
+
+                // only approved tuitions are apply-able
+                if ((tuition.status || "").toLowerCase() !== "approved") {
+                    return res.status(403).send({ message: "This tuition is not available for application" });
+                }
+
+                // prevent duplicate apply
+                const exists = await applicationsCollection.findOne({
+                    tuitionId: tuition._id.toString(),
+                    tutorEmail: data.tutorEmail,
+                });
+                if (exists) return res.status(409).send({ message: "You already applied to this tuition" });
+
+                const appDoc = {
+                    tuitionId: tuition._id.toString(),
+
+                    tuitionSnapshot: {
+                        subject: tuition.subject,
+                        classLevel: tuition.classLevel,
+                        location: tuition.location,
+                        schedule: tuition.schedule,
+                        budget: tuition.budget,
+                    },
+
+                    studentEmail: tuition.studentEmail,
+                    studentName: tuition.studentName || "",
+                    tutorEmail: data.tutorEmail,
+                    tutorName: data.tutorName,
+                    tutorPhoto: data.tutorPhoto || "",
+
+                    qualifications: data.qualifications,
+                    experience: data.experience,
+                    expectedSalary: Number(data.expectedSalary),
+
+                    status: "pending", // pending/approved/rejected
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                };
+
+                const result = await applicationsCollection.insertOne(appDoc);
+                res.send({ insertedId: result.insertedId });
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to apply" });
+            }
+        });
+        app.get("/applications", async (req, res) => {
+            try {
+                const { tutorEmail, studentEmail, tuitionId, status } = req.query;
+
+                const query = {};
+                if (tutorEmail) query.tutorEmail = tutorEmail;
+                if (studentEmail) query.studentEmail = studentEmail;
+                if (tuitionId) query.tuitionId = tuitionId;
+                if (status) query.status = status;
+
+                const result = await applicationsCollection.find(query).sort({ createdAt: -1 }).toArray();
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to load applications" });
+            }
+        });
+        app.patch("/applications/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const { qualifications, experience, expectedSalary } = req.body;
+
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid id" });
+
+                const appDoc = await applicationsCollection.findOne({ _id: new ObjectId(id) });
+                if (!appDoc) return res.status(404).send({ message: "Application not found" });
+
+                if ((appDoc.status || "").toLowerCase() !== "pending") {
+                    return res.status(403).send({ message: "Approved/Rejected applications cannot be edited" });
+                }
+
+                const updateDoc = {
+                    $set: {
+                        ...(qualifications ? { qualifications } : {}),
+                        ...(experience ? { experience } : {}),
+                        ...(expectedSalary !== undefined ? { expectedSalary: Number(expectedSalary) } : {}),
+                        updatedAt: new Date(),
+                    },
+                };
+
+                const result = await applicationsCollection.updateOne({ _id: new ObjectId(id) }, updateDoc);
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to update application" });
+            }
+        });
+        app.delete("/applications/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid id" });
+
+                const appDoc = await applicationsCollection.findOne({ _id: new ObjectId(id) });
+                if (!appDoc) return res.status(404).send({ message: "Application not found" });
+
+                if ((appDoc.status || "").toLowerCase() !== "pending") {
+                    return res.status(403).send({ message: "Approved/Rejected applications cannot be deleted" });
+                }
+
+                const result = await applicationsCollection.deleteOne({ _id: new ObjectId(id) });
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to delete application" });
+            }
+        });
 
 
 
