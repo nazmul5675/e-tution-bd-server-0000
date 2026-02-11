@@ -1,13 +1,23 @@
-require('dotenv').config()
+require('dotenv').config();
 const express = require('express')
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const cors = require('cors')
 const app = express()
 const port = process.env.PORT || 3000
 
-// middleware
-app.use(cors())
+
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+
+
+
+
+// middleware 
+app.use(cors());
 app.use(express.json());
+
+
+
 
 
 
@@ -32,6 +42,8 @@ async function run() {
         const usersCollection = db.collection('users');
         const tuitionsCollection = db.collection('tuitions');
         const applicationsCollection = db.collection("applications");
+        const paymentsCollection = db.collection("payments");
+
 
         app.get('/', (req, res) => {
             res.send('E-Tuition-BD Server is Running!')
@@ -109,6 +121,36 @@ async function run() {
             } catch (err) {
                 console.error(err);
                 res.status(500).send({ message: "Failed to update profile" });
+            }
+        });
+
+        // admin api dash board api 
+        app.patch("/users/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid user id" });
+
+                const { name, phone, photoURL, role, status, isVerified } = req.body;
+
+                const updateDoc = {
+                    $set: {
+                        ...(name !== undefined ? { name: name.trim() } : {}),
+                        ...(phone !== undefined ? { phone: phone.trim() } : {}),
+                        ...(photoURL !== undefined ? { photoURL } : {}),
+                        ...(role !== undefined ? { role } : {}),                // "student" | "tutor" | "admin"
+                        ...(status !== undefined ? { status } : {}),            // "active" | "blocked"
+                        ...(isVerified !== undefined ? { isVerified: !!isVerified } : {}),
+                        updatedAt: new Date(),
+                    },
+                };
+
+                const result = await usersCollection.updateOne({ _id: new ObjectId(id) }, updateDoc);
+                if (result.matchedCount === 0) return res.status(404).send({ message: "User not found" });
+
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to update user" });
             }
         });
 
@@ -342,6 +384,61 @@ async function run() {
                 res.status(500).send({ message: "Failed to update application" });
             }
         });
+        app.patch("/applications/:id/reject", async (req, res) => {
+            try {
+                const id = req.params.id;
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid id" });
+
+                const appDoc = await applicationsCollection.findOne({ _id: new ObjectId(id) });
+                if (!appDoc) return res.status(404).send({ message: "Application not found" });
+
+                if ((appDoc.status || "").toLowerCase() !== "pending") {
+                    return res.status(403).send({ message: "Only pending applications can be rejected" });
+                }
+
+                const result = await applicationsCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { status: "rejected", updatedAt: new Date() } }
+                );
+
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to reject application" });
+            }
+        });
+        app.patch("/applications/:id/approve", async (req, res) => {
+            try {
+                const id = req.params.id;
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid id" });
+
+                const appDoc = await applicationsCollection.findOne({ _id: new ObjectId(id) });
+                if (!appDoc) return res.status(404).send({ message: "Application not found" });
+
+                if ((appDoc.status || "").toLowerCase() !== "pending") {
+                    return res.status(403).send({ message: "Only pending applications can be approved" });
+                }
+
+                // approve this application
+                await applicationsCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { status: "approved", updatedAt: new Date() } }
+                );
+
+                // OPTIONAL: reject other pending applications for same tuition
+                await applicationsCollection.updateMany(
+                    { tuitionId: appDoc.tuitionId, _id: { $ne: new ObjectId(id) }, status: "pending" },
+                    { $set: { status: "rejected", updatedAt: new Date() } }
+                );
+
+                res.send({ message: "Approved successfully" });
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to approve application" });
+            }
+        });
+
+
         app.delete("/applications/:id", async (req, res) => {
             try {
                 const id = req.params.id;
@@ -362,6 +459,167 @@ async function run() {
             }
         });
 
+        // Create Checkout Session
+        app.post("/payments/create-checkout-session", async (req, res) => {
+            try {
+                const { applicationId, studentEmail } = req.body;
+
+                if (!applicationId) return res.status(400).send({ message: "applicationId is required" });
+                if (!ObjectId.isValid(applicationId)) return res.status(400).send({ message: "Invalid applicationId" });
+
+                const appDoc = await applicationsCollection.findOne({ _id: new ObjectId(applicationId) });
+                if (!appDoc) return res.status(404).send({ message: "Application not found" });
+
+                //only that student can pay/approve
+                //Later replace with JWT verification
+                const emailToMatch = studentEmail || appDoc.studentEmail;
+                if (emailToMatch !== appDoc.studentEmail) {
+                    return res.status(403).send({ message: "Unauthorized" });
+                }
+
+                if ((appDoc.status || "").toLowerCase() !== "pending") {
+                    return res.status(400).send({ message: "Only pending applications can be paid/approved" });
+                }
+
+                const amountBDT = Number(appDoc.expectedSalary || 0);
+                if (amountBDT <= 0) return res.status(400).send({ message: "Invalid expectedSalary" });
+
+
+                const session = await stripe.checkout.sessions.create({
+                    mode: "payment",
+                    payment_method_types: ["card"],
+                    customer_email: appDoc.studentEmail,
+                    line_items: [
+                        {
+                            quantity: 1,
+                            price_data: {
+                                currency: "bdt",
+                                unit_amount: Math.round(amountBDT * 100),
+                                product_data: {
+                                    name: `Tuition payment - ${appDoc?.tuitionSnapshot?.subject || "Tuition"}`,
+                                },
+                            },
+                        },
+                    ],
+                    metadata: {
+                        applicationId: appDoc._id.toString(),
+                        tuitionId: appDoc.tuitionId,
+                        studentEmail: appDoc.studentEmail,
+                        tutorEmail: appDoc.tutorEmail,
+                    },
+                    success_url: `${process.env.CLIENT_URL}/dashboard/payments?success=1&session_id={CHECKOUT_SESSION_ID}&applicationId=${appDoc._id}`,
+                    cancel_url: `${process.env.CLIENT_URL}/dashboard/payments?canceled=1&applicationId=${appDoc._id}`,
+                });
+
+                res.send({ url: session.url });
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to create checkout session" });
+            }
+        });
+
+        //  Stripe Webhook to handle post-payment actions
+        app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+            let event;
+            try {
+                const sig = req.headers["stripe-signature"];
+                event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+            } catch (err) {
+                console.error("Webhook signature verification failed:", err.message);
+                return res.status(400).send(`Webhook Error: ${err.message}`);
+            }
+
+            try {
+                if (event.type === "checkout.session.completed") {
+                    const session = event.data.object;
+
+                    const applicationId = session.metadata?.applicationId;
+                    if (!applicationId || !ObjectId.isValid(applicationId)) {
+                        return res.status(200).send({ received: true });
+                    }
+
+                    const appDoc = await applicationsCollection.findOne({ _id: new ObjectId(applicationId) });
+                    if (!appDoc) return res.status(200).send({ received: true });
+
+                    //  application approved
+                    await applicationsCollection.updateOne(
+                        { _id: new ObjectId(applicationId) },
+                        { $set: { status: "approved", updatedAt: new Date(), approvedAt: new Date() } }
+                    );
+
+                    // Reject other pending applications for same tuition 
+                    await applicationsCollection.updateMany(
+                        { tuitionId: appDoc.tuitionId, _id: { $ne: new ObjectId(applicationId) }, status: "pending" },
+                        { $set: { status: "rejected", updatedAt: new Date() } }
+                    );
+
+                    //  mark tuition assigned/ongoing
+                    await tuitionsCollection.updateOne(
+                        { _id: new ObjectId(appDoc.tuitionId) },
+                        {
+                            $set: {
+                                assignedTutorEmail: appDoc.tutorEmail,
+                                assignedTutorName: appDoc.tutorName,
+                                assignedTutorPhoto: appDoc.tutorPhoto || "",
+                                ongoing: true,
+                                updatedAt: new Date(),
+                            },
+                        }
+                    );
+
+                    //  Save payment record
+                    await paymentsCollection.insertOne({
+                        applicationId: applicationId,
+                        tuitionId: appDoc.tuitionId,
+                        studentEmail: appDoc.studentEmail,
+                        tutorEmail: appDoc.tutorEmail,
+                        amount: session.amount_total,
+                        currency: session.currency,
+                        stripeSessionId: session.id,
+                        paymentStatus: session.payment_status,
+                        createdAt: new Date(),
+                    });
+                }
+
+                res.status(200).send({ received: true });
+            } catch (err) {
+                console.error("Webhook handler failed:", err);
+                res.status(500).send("Webhook handler failed");
+            }
+        });
+
+        //  Get single application
+        app.get("/applications/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid id" });
+
+                const doc = await applicationsCollection.findOne({ _id: new ObjectId(id) });
+                if (!doc) return res.status(404).send({ message: "Application not found" });
+                res.send(doc);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to load application" });
+            }
+        });
+
+        //  Revenue history
+        app.get("/payments", async (req, res) => {
+            try {
+                const { tutorEmail, studentEmail } = req.query;
+                const query = {};
+                if (tutorEmail) query.tutorEmail = tutorEmail;
+                if (studentEmail) query.studentEmail = studentEmail;
+
+                const result = await paymentsCollection.find(query).sort({ createdAt: -1 }).toArray();
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to load payments" });
+            }
+        });
+
+        console.log("Server routes ready");
 
 
 
