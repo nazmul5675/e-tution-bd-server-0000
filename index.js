@@ -43,6 +43,8 @@ async function run() {
         const tuitionsCollection = db.collection('tuitions');
         const applicationsCollection = db.collection("applications");
         const paymentsCollection = db.collection("payments");
+        const contactsCollection = db.collection("contacts");
+
 
 
         app.get('/', (req, res) => {
@@ -696,6 +698,91 @@ async function run() {
                 res.status(500).send({ message: "Failed to load payments" });
             }
         });
+        //  Contact messages
+        app.post("/contacts", async (req, res) => {
+            try {
+                const { name, email, message } = req.body;
+
+                //  Basic validation
+                if (!name?.trim()) return res.status(400).send({ message: "Name is required" });
+                if (!email?.trim()) return res.status(400).send({ message: "Email is required" });
+                if (!message?.trim()) return res.status(400).send({ message: "Message is required" });
+
+                const doc = {
+                    name: name.trim(),
+                    email: email.trim().toLowerCase(),
+                    message: message.trim(),
+                    status: "new",
+                    createdAt: new Date(),
+                };
+
+                const result = await contactsCollection.insertOne(doc);
+
+                res.send({ insertedId: result.insertedId, message: "Message saved" });
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to save contact message" });
+            }
+        });
+        //  Get all contact messages (Admin)
+        app.get("/contacts", async (req, res) => {
+            try {
+                const { status } = req.query;
+
+                const query = {};
+                if (status) query.status = status; // new / seen / replied
+
+                const result = await contactsCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to load contact messages" });
+            }
+        });
+        //  Update message status (Admin)
+        app.patch("/contacts/:id/status", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const { status } = req.body;
+
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid id" });
+
+                const next = (status || "").toLowerCase().trim();
+                if (!["new", "seen", "replied"].includes(next)) {
+                    return res.status(400).send({ message: "Invalid status: use new/seen/replied" });
+                }
+
+                const result = await contactsCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { status: next, updatedAt: new Date() } }
+                );
+
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to update message status" });
+            }
+        });
+        //  Delete contact message (Admin)
+        app.delete("/contacts/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid id" });
+
+                const result = await contactsCollection.deleteOne({ _id: new ObjectId(id) });
+                res.send(result);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to delete message" });
+            }
+        });
+
+
 
         console.log("Server routes ready");
 
