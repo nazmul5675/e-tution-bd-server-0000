@@ -167,6 +167,21 @@ async function run() {
                 res.status(500).send({ message: "Failed to delete user" });
             }
         });
+        app.get("/users/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid user id" });
+
+                const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+                if (!user) return res.status(404).send({ message: "User not found" });
+
+                res.send(user);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to load user" });
+            }
+        });
+
 
 
         // tuitions api
@@ -227,6 +242,56 @@ async function run() {
                 res.status(500).send({ message: "Failed to load tuitions" });
             }
         });
+
+        // Get single tuition 
+        app.get("/tuitions/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid tuition id" });
+
+                const doc = await tuitionsCollection.findOne({ _id: new ObjectId(id) });
+                if (!doc) return res.status(404).send({ message: "Tuition not found" });
+
+                res.send(doc);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to load tuition" });
+            }
+        });
+
+        //  Admin approve/reject tuition post
+        app.patch("/tuitions/:id/status", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const { status } = req.body; // "approved" | "rejected" | "pending"
+
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid tuition id" });
+
+                const next = (status || "").toLowerCase().trim();
+                if (!["approved", "rejected", "pending"].includes(next)) {
+                    return res.status(400).send({ message: "Invalid status. Use approved/rejected/pending" });
+                }
+
+                const updateDoc = {
+                    $set: {
+                        status: next,
+                        updatedAt: new Date(),
+                        ...(next === "approved" ? { approvedAt: new Date() } : {}),
+                        ...(next === "rejected" ? { rejectedAt: new Date() } : {}),
+                    },
+                };
+
+                const result = await tuitionsCollection.updateOne({ _id: new ObjectId(id) }, updateDoc);
+
+                if (result.matchedCount === 0) return res.status(404).send({ message: "Tuition not found" });
+
+                res.send({ message: "Status updated", result });
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to update status" });
+            }
+        });
+
         app.patch("/tuitions/:id", async (req, res) => {
             try {
                 const id = req.params.id;
@@ -523,7 +588,7 @@ async function run() {
                     success_url: `${process.env.CLIENT_URL}/dashboard/payments?success=1&session_id={CHECKOUT_SESSION_ID}&applicationId=${appDoc._id}`,
                     cancel_url: `${process.env.CLIENT_URL}/dashboard/payments?canceled=1&applicationId=${appDoc._id}`,
                 });
-
+                console.log("CLIENT_URL =", process.env.CLIENT_URL);
                 res.send({ url: session.url });
             } catch (err) {
                 console.error(err);
@@ -531,75 +596,75 @@ async function run() {
             }
         });
 
-        //  Stripe Webhook to handle post-payment actions
-        app.post("/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
-            let event;
+        app.post("/payments/confirm", async (req, res) => {
             try {
-                const sig = req.headers["stripe-signature"];
-                event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-            } catch (err) {
-                console.error("Webhook signature verification failed:", err.message);
-                return res.status(400).send(`Webhook Error: ${err.message}`);
-            }
+                const { session_id, applicationId } = req.body;
 
-            try {
-                if (event.type === "checkout.session.completed") {
-                    const session = event.data.object;
+                if (!session_id) return res.status(400).send({ message: "session_id required" });
+                if (!applicationId || !ObjectId.isValid(applicationId))
+                    return res.status(400).send({ message: "Valid applicationId required" });
 
-                    const applicationId = session.metadata?.applicationId;
-                    if (!applicationId || !ObjectId.isValid(applicationId)) {
-                        return res.status(200).send({ received: true });
-                    }
+                //  verify session in Stripe
+                const session = await stripe.checkout.sessions.retrieve(session_id);
 
-                    const appDoc = await applicationsCollection.findOne({ _id: new ObjectId(applicationId) });
-                    if (!appDoc) return res.status(200).send({ received: true });
-
-                    //  application approved
-                    await applicationsCollection.updateOne(
-                        { _id: new ObjectId(applicationId) },
-                        { $set: { status: "approved", updatedAt: new Date(), approvedAt: new Date() } }
-                    );
-
-                    // Reject other pending applications for same tuition 
-                    await applicationsCollection.updateMany(
-                        { tuitionId: appDoc.tuitionId, _id: { $ne: new ObjectId(applicationId) }, status: "pending" },
-                        { $set: { status: "rejected", updatedAt: new Date() } }
-                    );
-
-                    //  mark tuition assigned/ongoing
-                    await tuitionsCollection.updateOne(
-                        { _id: new ObjectId(appDoc.tuitionId) },
-                        {
-                            $set: {
-                                assignedTutorEmail: appDoc.tutorEmail,
-                                assignedTutorName: appDoc.tutorName,
-                                assignedTutorPhoto: appDoc.tutorPhoto || "",
-                                ongoing: true,
-                                updatedAt: new Date(),
-                            },
-                        }
-                    );
-
-                    //  Save payment record
-                    await paymentsCollection.insertOne({
-                        applicationId: applicationId,
-                        tuitionId: appDoc.tuitionId,
-                        studentEmail: appDoc.studentEmail,
-                        tutorEmail: appDoc.tutorEmail,
-                        amount: session.amount_total,
-                        currency: session.currency,
-                        stripeSessionId: session.id,
-                        paymentStatus: session.payment_status,
-                        createdAt: new Date(),
-                    });
+                if (session.payment_status !== "paid") {
+                    return res.status(400).send({ message: "Payment not completed" });
                 }
 
-                res.status(200).send({ received: true });
+                const appDoc = await applicationsCollection.findOne({ _id: new ObjectId(applicationId) });
+                if (!appDoc) return res.status(404).send({ message: "Application not found" });
+
+                //  prevent double confirm
+                if ((appDoc.status || "").toLowerCase() === "approved") {
+                    return res.send({ message: "Already approved" });
+                }
+
+                // approve application
+                await applicationsCollection.updateOne(
+                    { _id: new ObjectId(applicationId) },
+                    { $set: { status: "approved", updatedAt: new Date(), approvedAt: new Date() } }
+                );
+
+                // reject others for same tuition
+                await applicationsCollection.updateMany(
+                    { tuitionId: appDoc.tuitionId, _id: { $ne: new ObjectId(applicationId) }, status: "pending" },
+                    { $set: { status: "rejected", updatedAt: new Date() } }
+                );
+
+                // mark tuition ongoing
+                await tuitionsCollection.updateOne(
+                    { _id: new ObjectId(appDoc.tuitionId) },
+                    {
+                        $set: {
+                            assignedTutorEmail: appDoc.tutorEmail,
+                            assignedTutorName: appDoc.tutorName,
+                            assignedTutorPhoto: appDoc.tutorPhoto || "",
+                            ongoing: true,
+                            updatedAt: new Date(),
+                        },
+                    }
+                );
+
+                // save payment record
+                await paymentsCollection.insertOne({
+                    applicationId,
+                    tuitionId: appDoc.tuitionId,
+                    studentEmail: appDoc.studentEmail,
+                    tutorEmail: appDoc.tutorEmail,
+                    amount: session.amount_total, // this is in paisa
+                    currency: session.currency,
+                    stripeSessionId: session.id,
+                    paymentStatus: session.payment_status,
+                    createdAt: new Date(),
+                });
+
+                res.send({ message: "Payment confirmed & approved" });
             } catch (err) {
-                console.error("Webhook handler failed:", err);
-                res.status(500).send("Webhook handler failed");
+                console.error(err);
+                res.status(500).send({ message: "Failed to confirm payment" });
             }
         });
+
 
         //  Get single application
         app.get("/applications/:id", async (req, res) => {
