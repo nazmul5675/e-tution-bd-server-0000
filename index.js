@@ -17,7 +17,22 @@ app.use(cors());
 app.use(express.json());
 
 
+const admin = require("./firebaseAdmin");
 
+const verifyFirebaseToken = async (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+
+        if (!token) return res.status(401).send({ message: "Unauthorized" });
+
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.decoded = decoded;
+        next();
+    } catch (err) {
+        return res.status(401).send({ message: "Invalid token" });
+    }
+};
 
 
 
@@ -44,6 +59,29 @@ async function run() {
         const applicationsCollection = db.collection("applications");
         const paymentsCollection = db.collection("payments");
         const contactsCollection = db.collection("contacts");
+
+
+        const verifyRole = (role) => {
+            return async (req, res, next) => {
+                try {
+                    const email = req.decoded?.email;
+                    if (!email) return res.status(401).send({ message: "Unauthorized" });
+
+                    const user = await usersCollection.findOne({ email });
+                    if (!user) return res.status(403).send({ message: "Forbidden" });
+
+                    if (user.role !== role) return res.status(403).send({ message: "Forbidden" });
+
+                    next();
+                } catch (err) {
+                    return res.status(500).send({ message: "Role check failed" });
+                }
+            };
+        };
+
+
+
+
 
 
 
@@ -781,6 +819,32 @@ async function run() {
                 res.status(500).send({ message: "Failed to delete message" });
             }
         });
+
+
+
+        app.get("/auth/check", verifyFirebaseToken, (req, res) => {
+            res.send({
+                ok: true,
+                email: req.decoded.email,
+                uid: req.decoded.uid,
+            });
+        });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
