@@ -89,38 +89,40 @@ async function run() {
             res.send('E-Tuition-BD Server is Running!')
         })
         // users api
-        app.post("/users", async (req, res) => {
-            const user = req.body;
+        app.post("/users", verifyFirebaseToken, async (req, res) => {
+            const email = req.decoded.email;
+            const { name, phone, photoURL, role } = req.body;
 
-            const filter = { email: user.email };
+
+            const safeRole = role === "tutor" ? "tutor" : "student";
+
+            const filter = { email };
 
             const updateDoc = {
                 $set: {
-                    name: user.name || "",
-                    phone: user.phone || "",
-                    photoURL: user.photoURL || "",
+                    name: name || "",
+                    phone: phone || "",
+                    photoURL: photoURL || "",
                     lastLoginAt: new Date(),
                 },
                 $setOnInsert: {
-
-                    role: user.role || "student",
+                    role: safeRole,
                     createdAt: new Date(),
-                    email: user.email,
+                    email,
                 },
             };
 
             const result = await usersCollection.updateOne(filter, updateDoc, { upsert: true });
-
             res.send(result);
         });
+
         app.get("/users", async (req, res) => {
             const users = await usersCollection.find().toArray();
             res.send(users);
         });
-        app.get("/users/profile", async (req, res) => {
+        app.get("/users/profile", verifyFirebaseToken, async (req, res) => {
             try {
-                const email = req.query.email;
-                if (!email) return res.status(400).send({ message: "email is required" });
+                const email = req.decoded.email;
 
                 const user = await usersCollection.findOne(
                     { email },
@@ -134,12 +136,12 @@ async function run() {
                 res.status(500).send({ message: "Failed to load profile" });
             }
         });
-        app.patch("/users/profile", async (req, res) => {
+
+        app.patch("/users/profile", verifyFirebaseToken, async (req, res) => {
             try {
-                const email = req.query.email;
+                const email = req.decoded.email;
                 const { name, phone, photoURL } = req.body;
 
-                if (!email) return res.status(400).send({ message: "email is required" });
                 if (!name?.trim()) return res.status(400).send({ message: "name is required" });
 
                 const updateDoc = {
@@ -153,9 +155,7 @@ async function run() {
 
                 const result = await usersCollection.updateOne({ email }, updateDoc);
 
-                if (result.matchedCount === 0) {
-                    return res.status(404).send({ message: "User not found" });
-                }
+                if (result.matchedCount === 0) return res.status(404).send({ message: "User not found" });
 
                 res.send(result);
             } catch (err) {
@@ -164,8 +164,9 @@ async function run() {
             }
         });
 
+
         // admin api dash board api 
-        app.patch("/users/:id", async (req, res) => {
+        app.patch("/users/:id", verifyFirebaseToken, verifyRole("admin"), async (req, res) => {
             try {
                 const id = req.params.id;
                 if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid user id" });
@@ -193,7 +194,7 @@ async function run() {
                 res.status(500).send({ message: "Failed to update user" });
             }
         });
-        app.delete("/users/:id", async (req, res) => {
+        app.delete("/users/:id", verifyFirebaseToken, verifyRole("admin"), async (req, res) => {
             try {
                 const id = req.params.id;
                 if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid user id" });
@@ -207,7 +208,7 @@ async function run() {
                 res.status(500).send({ message: "Failed to delete user" });
             }
         });
-        app.get("/users/:id", async (req, res) => {
+        app.get("/users/:id", verifyFirebaseToken, verifyRole("admin"), async (req, res) => {
             try {
                 const id = req.params.id;
                 if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid user id" });
@@ -225,10 +226,10 @@ async function run() {
 
 
         // tuitions api
-        app.post("/tuitions", async (req, res) => {
+        app.post("/tuitions", verifyFirebaseToken, async (req, res) => {
             try {
                 const data = req.body;
-
+                const email = req.decoded.email;
                 // Basic validation 
                 const required = ["subject", "classLevel", "location", "schedule", "budget", "studentEmail"];
                 for (const key of required) {
@@ -249,7 +250,7 @@ async function run() {
 
                     // student info
                     studentName: data.studentName || "",
-                    studentEmail: data.studentEmail,
+                    studentEmail: email,
                     studentPhoto: data.studentPhoto || "",
                     status: "pending",
                     createdAt: new Date(),
@@ -265,17 +266,8 @@ async function run() {
         })
         app.get("/tuitions", async (req, res) => {
             try {
-                const { studentEmail, status } = req.query;
-
-                const query = {};
-                if (studentEmail) query.studentEmail = studentEmail;
-                if (status) query.status = status; // pending/approved/rejected
-
-                const result = await tuitionsCollection
-                    .find(query)
-                    .sort({ createdAt: -1 })
-                    .toArray();
-
+                const query = { status: "approved" }; // public page shows only approved
+                const result = await tuitionsCollection.find(query).sort({ createdAt: -1 }).toArray();
                 res.send(result);
             } catch (err) {
                 console.error(err);
@@ -289,9 +281,12 @@ async function run() {
                 const id = req.params.id;
                 if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid tuition id" });
 
-                const doc = await tuitionsCollection.findOne({ _id: new ObjectId(id) });
-                if (!doc) return res.status(404).send({ message: "Tuition not found" });
+                const doc = await tuitionsCollection.findOne(
+                    { _id: new ObjectId(id), status: "approved" }, // only approved is public
+                    { projection: { studentEmail: 0 } }            // hide private data
+                );
 
+                if (!doc) return res.status(404).send({ message: "Tuition not found" });
                 res.send(doc);
             } catch (err) {
                 console.error(err);
@@ -300,7 +295,7 @@ async function run() {
         });
 
         //  Admin approve/reject tuition post
-        app.patch("/tuitions/:id/status", async (req, res) => {
+        app.patch("/tuitions/:id/status", verifyFirebaseToken, verifyRole("admin"), async (req, res) => {
             try {
                 const id = req.params.id;
                 const { status } = req.body; // "approved" | "rejected" | "pending"
@@ -332,7 +327,7 @@ async function run() {
             }
         });
 
-        app.patch("/tuitions/:id", async (req, res) => {
+        app.patch("/tuitions/:id", verifyFirebaseToken, async (req, res) => {
             try {
                 const id = req.params.id;
                 const updatedData = req.body;
@@ -372,7 +367,7 @@ async function run() {
             }
         });
 
-        app.delete("/tuitions/:id", async (req, res) => {
+        app.delete("/tuitions/:id", verifyFirebaseToken, async (req, res) => {
             try {
                 const id = req.params.id;
 
@@ -394,7 +389,7 @@ async function run() {
         });
 
         // applicationsCollection api
-        app.post("/applications", async (req, res) => {
+        app.post("/applications", verifyFirebaseToken, async (req, res) => {
             try {
                 const data = req.body;
 
@@ -455,7 +450,7 @@ async function run() {
                 res.status(500).send({ message: "Failed to apply" });
             }
         });
-        app.get("/applications", async (req, res) => {
+        app.get("/applications", verifyFirebaseToken, async (req, res) => {
             try {
                 const { tutorEmail, studentEmail, tuitionId, status } = req.query;
 
@@ -472,7 +467,7 @@ async function run() {
                 res.status(500).send({ message: "Failed to load applications" });
             }
         });
-        app.patch("/applications/:id", async (req, res) => {
+        app.patch("/applications/:id", verifyFirebaseToken, async (req, res) => {
             try {
                 const id = req.params.id;
                 const { qualifications, experience, expectedSalary } = req.body;
@@ -502,7 +497,7 @@ async function run() {
                 res.status(500).send({ message: "Failed to update application" });
             }
         });
-        app.patch("/applications/:id/reject", async (req, res) => {
+        app.patch("/applications/:id/reject", verifyFirebaseToken, async (req, res) => {
             try {
                 const id = req.params.id;
                 if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid id" });
@@ -525,7 +520,7 @@ async function run() {
                 res.status(500).send({ message: "Failed to reject application" });
             }
         });
-        app.patch("/applications/:id/approve", async (req, res) => {
+        app.patch("/applications/:id/approve", verifyFirebaseToken, async (req, res) => {
             try {
                 const id = req.params.id;
                 if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid id" });
@@ -557,7 +552,7 @@ async function run() {
         });
 
 
-        app.delete("/applications/:id", async (req, res) => {
+        app.delete("/applications/:id", verifyFirebaseToken, async (req, res) => {
             try {
                 const id = req.params.id;
                 if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid id" });
@@ -578,7 +573,7 @@ async function run() {
         });
 
         // Create Checkout Session
-        app.post("/payments/create-checkout-session", async (req, res) => {
+        app.post("/payments/create-checkout-session", verifyFirebaseToken, async (req, res) => {
             try {
                 const { applicationId, studentEmail } = req.body;
 
@@ -636,7 +631,7 @@ async function run() {
             }
         });
 
-        app.post("/payments/confirm", async (req, res) => {
+        app.post("/payments/confirm", verifyFirebaseToken, async (req, res) => {
             try {
                 const { session_id, applicationId } = req.body;
 
@@ -707,7 +702,7 @@ async function run() {
 
 
         //  Get single application
-        app.get("/applications/:id", async (req, res) => {
+        app.get("/applications/:id", verifyFirebaseToken, async (req, res) => {
             try {
                 const id = req.params.id;
                 if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid id" });
@@ -722,7 +717,7 @@ async function run() {
         });
 
         //  Revenue history
-        app.get("/payments", async (req, res) => {
+        app.get("/payments", verifyFirebaseToken, async (req, res) => {
             try {
                 const { tutorEmail, studentEmail } = req.query;
                 const query = {};
@@ -763,7 +758,7 @@ async function run() {
             }
         });
         //  Get all contact messages (Admin)
-        app.get("/contacts", async (req, res) => {
+        app.get("/contacts", verifyFirebaseToken, verifyRole("admin"), async (req, res) => {
             try {
                 const { status } = req.query;
 
@@ -782,7 +777,7 @@ async function run() {
             }
         });
         //  Update message status (Admin)
-        app.patch("/contacts/:id/status", async (req, res) => {
+        app.patch("/contacts/:id/status", verifyFirebaseToken, verifyRole("admin"), async (req, res) => {
             try {
                 const id = req.params.id;
                 const { status } = req.body;
@@ -806,7 +801,7 @@ async function run() {
             }
         });
         //  Delete contact message (Admin)
-        app.delete("/contacts/:id", async (req, res) => {
+        app.delete("/contacts/:id", verifyFirebaseToken, verifyRole("admin"), async (req, res) => {
             try {
                 const id = req.params.id;
 
@@ -822,13 +817,6 @@ async function run() {
 
 
 
-        app.get("/auth/check", verifyFirebaseToken, (req, res) => {
-            res.send({
-                ok: true,
-                email: req.decoded.email,
-                uid: req.decoded.uid,
-            });
-        });
 
 
 
