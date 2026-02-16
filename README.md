@@ -1,7 +1,6 @@
 
 ---
 
-## ✅ `e-tution-bd-server/README.md`
 
 ```md
 # E-Tuition BD — Server (Backend)
