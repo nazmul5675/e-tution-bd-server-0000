@@ -4,12 +4,22 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const cors = require('cors')
 const app = express()
 const port = process.env.PORT || 3000
+const admin = require("firebase-admin");
+
+const decoded = Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, "base64").toString("utf8");
+const serviceAccount = JSON.parse(decoded);
+
+admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+});
+
+
+
+
+
 
 
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-
-
-
 
 
 // middleware 
@@ -17,7 +27,7 @@ app.use(cors());
 app.use(express.json());
 
 
-const admin = require("./firebaseAdmin");
+
 
 const verifyFirebaseToken = async (req, res, next) => {
     try {
@@ -25,6 +35,20 @@ const verifyFirebaseToken = async (req, res, next) => {
         const token = authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
 
         if (!token) return res.status(401).send({ message: "Unauthorized" });
+
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.decoded = decoded;
+        next();
+    } catch (err) {
+        return res.status(401).send({ message: "Invalid token" });
+    }
+};
+const verifyFirebaseTokenOptional = async (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
+
+        if (!token) return next(); // public request
 
         const decoded = await admin.auth().verifyIdToken(token);
         req.decoded = decoded;
@@ -52,7 +76,7 @@ const client = new MongoClient(uri, {
 async function run() {
     try {
         // Connect the client to the server	(optional starting in v4.7)
-        await client.connect();
+        // await client.connect();
         const db = client.db('e-tuition-bd');
         const usersCollection = db.collection('users');
         const tuitionsCollection = db.collection('tuitions');
@@ -116,10 +140,43 @@ async function run() {
             res.send(result);
         });
 
-        app.get("/users", async (req, res) => {
-            const users = await usersCollection.find().toArray();
-            res.send(users);
+
+        app.get("/users", verifyFirebaseTokenOptional, async (req, res) => {
+            try {
+
+                if (req.decoded?.email) {
+                    const me = await usersCollection.findOne({ email: req.decoded.email });
+                    if (me?.role === "admin") {
+                        const users = await usersCollection.find().toArray();
+                        return res.send(users);
+                    }
+                }
+
+
+
+                const tutors = await usersCollection
+                    .find(
+                        { role: "tutor" },
+                        {
+                            projection: {
+                                name: 1,
+                                photoURL: 1,
+                                role: 1,
+                                createdAt: 1,
+                                email: 1,
+                                phone: 1,
+                            },
+                        }
+                    )
+                    .toArray();
+
+                res.send(tutors);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to load users" });
+            }
         });
+
         app.get("/users/profile", verifyFirebaseToken, async (req, res) => {
             try {
                 const email = req.decoded.email;
@@ -208,20 +265,47 @@ async function run() {
                 res.status(500).send({ message: "Failed to delete user" });
             }
         });
-        app.get("/users/:id", verifyFirebaseToken, verifyRole("admin"), async (req, res) => {
+
+        app.get("/users/:id", verifyFirebaseTokenOptional, async (req, res) => {
             try {
                 const id = req.params.id;
                 if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid user id" });
 
-                const user = await usersCollection.findOne({ _id: new ObjectId(id) });
-                if (!user) return res.status(404).send({ message: "User not found" });
+                // If admin -> full access
+                if (req.decoded?.email) {
+                    const me = await usersCollection.findOne({ email: req.decoded.email });
+                    if (me?.role === "admin") {
+                        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+                        if (!user) return res.status(404).send({ message: "User not found" });
+                        return res.send(user);
+                    }
+                }
 
-                res.send(user);
+                // Public tutor profile
+                const tutor = await usersCollection.findOne(
+                    { _id: new ObjectId(id), role: "tutor" },
+                    {
+                        projection: {
+                            name: 1,
+                            photoURL: 1,
+                            role: 1,
+                            phone: 1,
+                            email: 1,
+                            createdAt: 1,
+                            status: 1,
+                            isVerified: 1
+                        }
+                    }
+                );
+
+                if (!tutor) return res.status(404).send({ message: "Tutor not found" });
+                res.send(tutor);
             } catch (err) {
                 console.error(err);
                 res.status(500).send({ message: "Failed to load user" });
             }
         });
+
 
 
 
@@ -231,7 +315,7 @@ async function run() {
                 const data = req.body;
                 const email = req.decoded.email;
                 // Basic validation 
-                const required = ["subject", "classLevel", "location", "schedule", "budget", "studentEmail"];
+                const required = ["subject", "classLevel", "location", "schedule", "budget"];
                 for (const key of required) {
                     if (!data?.[key]) {
                         return res.status(400).send({ message: `${key} is required` });
@@ -264,16 +348,51 @@ async function run() {
                 res.status(500).send({ message: "Failed to post tuition" });
             }
         })
-        app.get("/tuitions", async (req, res) => {
+        app.get("/tuitions", verifyFirebaseTokenOptional, async (req, res) => {
             try {
-                const query = { status: "approved" }; // public page shows only approved
-                const result = await tuitionsCollection.find(query).sort({ createdAt: -1 }).toArray();
+                //  if logged in -> dashboard behavior
+                if (req.decoded?.email) {
+                    const email = req.decoded.email;
+                    const me = await usersCollection.findOne({ email });
+
+                    // admin can see all (and can filter)
+                    if (me?.role === "admin") {
+                        const query = {};
+                        if (req.query.studentEmail) query.studentEmail = req.query.studentEmail;
+                        if (req.query.status) query.status = req.query.status;
+                        const result = await tuitionsCollection.find(query).sort({ createdAt: -1 }).toArray();
+                        return res.send(result);
+                    }
+
+                    // student sees only own tuitions (all statuses)
+                    if (me?.role === "student") {
+                        const result = await tuitionsCollection
+                            .find({ studentEmail: email })
+                            .sort({ createdAt: -1 })
+                            .toArray();
+                        return res.send(result);
+                    }
+
+                    // tutor logged in -> still public behavior (only approved)
+                    const result = await tuitionsCollection
+                        .find({ status: "approved" })
+                        .sort({ createdAt: -1 })
+                        .toArray();
+                    return res.send(result);
+                }
+
+                //  public behavior (no token)
+                const result = await tuitionsCollection
+                    .find({ status: "approved" })
+                    .sort({ createdAt: -1 })
+                    .toArray();
                 res.send(result);
             } catch (err) {
                 console.error(err);
                 res.status(500).send({ message: "Failed to load tuitions" });
             }
         });
+
 
         // Get single tuition 
         app.get("/tuitions/:id", async (req, res) => {
@@ -330,12 +449,20 @@ async function run() {
         app.patch("/tuitions/:id", verifyFirebaseToken, async (req, res) => {
             try {
                 const id = req.params.id;
-                const updatedData = req.body;
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid tuition id" });
 
-                if (!ObjectId.isValid(id)) {
-                    return res.status(400).send({ message: "Invalid tuition id" });
+                const email = req.decoded.email;
+                const me = await usersCollection.findOne({ email });
+
+                const tuition = await tuitionsCollection.findOne({ _id: new ObjectId(id) });
+                if (!tuition) return res.status(404).send({ message: "Tuition not found" });
+
+                // only owner student OR admin can edit
+                if (me?.role !== "admin" && tuition.studentEmail !== email) {
+                    return res.status(403).send({ message: "Forbidden" });
                 }
 
+                const updatedData = req.body;
 
                 const updateDoc = {
                     $set: {
@@ -351,15 +478,7 @@ async function run() {
                     },
                 };
 
-                const result = await tuitionsCollection.updateOne(
-                    { _id: new ObjectId(id) },
-                    updateDoc
-                );
-
-                if (result.matchedCount === 0) {
-                    return res.status(404).send({ message: "Tuition not found" });
-                }
-
+                const result = await tuitionsCollection.updateOne({ _id: new ObjectId(id) }, updateDoc);
                 res.send(result);
             } catch (err) {
                 console.error(err);
@@ -367,20 +486,24 @@ async function run() {
             }
         });
 
+
         app.delete("/tuitions/:id", verifyFirebaseToken, async (req, res) => {
             try {
                 const id = req.params.id;
+                if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid tuition id" });
 
-                if (!ObjectId.isValid(id)) {
-                    return res.status(400).send({ message: "Invalid tuition id" });
+                const email = req.decoded.email;
+                const me = await usersCollection.findOne({ email });
+
+                const tuition = await tuitionsCollection.findOne({ _id: new ObjectId(id) });
+                if (!tuition) return res.status(404).send({ message: "Tuition not found" });
+
+                // only owner student OR admin can delete
+                if (me?.role !== "admin" && tuition.studentEmail !== email) {
+                    return res.status(403).send({ message: "Forbidden" });
                 }
 
                 const result = await tuitionsCollection.deleteOne({ _id: new ObjectId(id) });
-
-                if (result.deletedCount === 0) {
-                    return res.status(404).send({ message: "Tuition not found" });
-                }
-
                 res.send(result);
             } catch (err) {
                 console.error(err);
@@ -841,7 +964,7 @@ async function run() {
 
 
         // Send a ping to confirm a successful connection
-        await client.db("admin").command({ ping: 1 });
+        // await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
         // Ensures that the client will close when you finish/error
@@ -854,6 +977,7 @@ run().catch(console.dir);
 
 
 
-app.listen(port, () => {
-    console.log(`Server listening on port ${port}`)
-})
+// app.listen(port, () => {
+//     console.log(`Server listening on port ${port}`)
+// })
+module.exports = app;
